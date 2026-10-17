@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"NoRAM local cookie exporter","version":"1.0.0","description":"Export cookies to a local file for an explicit NoRAM import. No network requests.","permissions":["cookies"],"host_permissions":["<all_urls>"],"action":{"default_title":"Export cookies for NoRAM","default_popup":"popup.html"}}

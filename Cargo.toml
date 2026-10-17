@@ -11,6 +11,9 @@ adblock = "=0.13.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+regex = "1"
+html-escape = "=0.3.0"
 tao = "=0.35.3"
 wry = { version = "=0.55.1", features = ["devtools"] }
 webview2-com = "=0.38.2"

@@ -6,3 +6,6 @@
 *.log
 .env*
 !*.example
+
+/NoRAM Browser.exe
+/NoRAM Browser Updated.exe

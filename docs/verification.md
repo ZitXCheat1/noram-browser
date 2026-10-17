@@ -93,3 +93,25 @@ No comparative CPU, memory, startup or page-load benchmark was performed. Count 
 No VPN tunnel was established because no VPN profile/provider was available. The connect/disconnect implementation invokes Windows against an explicitly selected saved profile; its behavior with a real provider remains unverified. This is not an included VPN service or kill switch.
 
 Chrome Web Store compatibility, extension toolbar popups, every Chromium extension API, advanced cosmetic rules/scriptlets, fingerprint resistance, all website permissions, DRM, downloads/printing, screen-reader accessibility, long-running stability and clean-machine installation were not comprehensively tested. Adblock lists are bundled snapshots, not an automatic update service. Hosted GitHub Actions status must be checked separately from these local results.
+
+## Browser-data import verification (17 October 2026)
+
+The optimized executable passed live checks using disposable NoRAM profiles and synthetic data only:
+
+- Settings opens the Import browser data screen. File preview has no bookmark side effects; cancellation invalidates the pending import ticket.
+- HTML entity decoding, unsafe URL rejection, duplicate bookmark preservation and explicit apply work through the native command handlers.
+- Native WebView2 cookie import preserves session/persistent status, HttpOnly, Secure and SameSite attributes. A local HTTP server actually received the imported session cookie; page JavaScript could not read its HttpOnly value. WebView2 applies its own persistent-cookie expiry cap.
+- Website cookies did not appear in the privileged Settings profile. Cookie plaintext was absent from frontend state.
+- Private windows hide import controls and reject native import commands.
+- Rust fixture tests cover Chromium/Firefox bookmark and history databases, Firefox cookies, unchanged source database bytes, container/partition exclusion, expired/malformed cookies, JSON/Netscape formats and redacted diagnostics.
+- The helper exporter's domain filtering, partition exclusion, local download path and validation passed against a fake cookie API. Loading that helper into a real personal source browser was deliberately not exercised; source-browser export interoperability remains a manual check.
+
+Reproduce after starting the isolated browser and local fixture described above:
+
+```powershell
+node scripts/import-fixtures.cjs
+node scripts/exporter-test.cjs
+playwright-cli -s=noram-smoke run-code --filename scripts/import-smoke.js
+```
+
+For the private import test, launch a separate disposable `--private --profile artifacts/import-private-profile --background --debug-port 9250` instance, attach another Playwright CLI session to port 9250, and run `scripts/import-private-smoke.js`. The import scripts assume the repository is the app's working directory. No actual personal browsing data or login session was transferred during these checks.

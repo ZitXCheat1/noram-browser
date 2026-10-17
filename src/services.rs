@@ -131,3 +131,31 @@ pub fn vpn_settings() -> Result<()> {
     }
     Ok(())
 }
+
+pub fn pick_import_folder() -> Result<Option<PathBuf>> {
+    pick_import(true)
+}
+pub fn pick_import_file() -> Result<Option<PathBuf>> {
+    pick_import(false)
+}
+fn pick_import(folder: bool) -> Result<Option<PathBuf>> {
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+        let mut options = FOS_FORCEFILESYSTEM | windows::Win32::UI::Shell::FOS_FILEMUSTEXIST;
+        if folder {
+            options |= FOS_PICKFOLDERS;
+        }
+        dialog.SetOptions(options)?;
+        dialog.SetTitle(w!("Choose browser data to preview"))?;
+        if let Err(e) = dialog.Show(None) {
+            if e.code().0 as u32 == 0x800704c7 {
+                return Ok(None);
+            }
+            return Err(e.into());
+        }
+        Ok(Some(PathBuf::from(webview2_com::take_pwstr(
+            dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?,
+        ))))
+    }
+}

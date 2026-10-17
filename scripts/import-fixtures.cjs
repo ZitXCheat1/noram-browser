@@ -1,0 +1,5 @@
+// Creates public synthetic fixtures only. Never reads a real browser profile.
+const fs=require('node:fs');fs.mkdirSync('artifacts',{recursive:true});
+fs.writeFileSync('artifacts/import-bookmarks.html','<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><DT><A HREF="http://127.0.0.1:48621/imported">Imported fixture &amp; bookmark</A><DT><A HREF="http://127.0.0.1:48621/imported">Duplicate</A><DT><A HREF="javascript:alert(1)">Unsafe</A></DL>');
+fs.writeFileSync('artifacts/import-cookies.json',JSON.stringify({cookies:[{name:'noram_import_http',value:'synthetic-only',domain:'127.0.0.1',path:'/',secure:false,httpOnly:true,sameSite:'lax',session:true},{name:'noram_import_secure',value:'synthetic-only',domain:'example.com',path:'/',secure:true,httpOnly:true,sameSite:'strict',expirationDate:4102444800},{name:'expired',value:'synthetic-only',domain:'example.com',expirationDate:1},{name:'partitioned',value:'synthetic-only',domain:'example.com',partitionKey:{topLevelSite:'https://other.example'}}]}));
+console.log('Synthetic import fixtures ready in artifacts/.');

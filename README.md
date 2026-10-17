@@ -25,6 +25,8 @@ An optional HTTP/HTTPS URL opens on launch. Normal instances use an exclusive pr
 
 ## What's included
 
+- **Import browser data:** Settings → Import browser data previews bookmarks and history from Brave/Chrome/Edge/Firefox and other supported profiles. Import ordinary Firefox cookies or explicit JSON/Netscape cookie exports. Includes a local Chromium cookie-export helper; encrypted Chromium databases are not decrypted. [Import guide](docs/IMPORT.md).
+
 - **Clean, local UI:** rounded filled IcoMoon Free SVG icons, local font assets, light/dark/system themes, optional bookmarks bar. Uses installed Proxima Nova (DuckDuckGo's default family), with bundled Figtree as a licensed fallback. Proxima Nova is not bundled.
 - **Search:** DuckDuckGo, Brave Search, Google, Bing, Startpage, Ecosia and Wikipedia. Choose a default or use `!d`, `!b`, `!g`, `!bi`, `!s`, `!e`, `!w` followed by search terms. Search terms are sent to the chosen provider.
 - **Tabs:** instant visual selection, stable DOM elements, drag reordering, middle-click close, pin/keep awake, mute/unmute, duplicate, close other/right tabs, reopen the last 20 closed tabs, and a searchable tab manager. Pins and mute state survive session restoration.

@@ -21,6 +21,7 @@ function showPanel(next){
   send('panel',{open:true});
   if(next==='extensions')send('extensions');
   if(next==='vpn')send('vpn_refresh');
+  if(next==='import')send('import_scan');
   renderPanel();
 }
 function goBackToPage(){panel='home';mounted='';send('panel',{open:false});renderPanel();}
@@ -83,10 +84,11 @@ function renderPanel(){
  if(mounted!==panel){mounted=panel;const host=$('content');host.replaceChildren();host.scrollTop=0;
   if(panel==='home')home(host);
   else{const page=el('div',undefined,'page');host.append(page);
-   const info={bookmarks:['Bookmarks','Keep the useful parts of the web close.'],history:['History',state.private?'This private window records no browsing history.':'Your recent pages, stored on this device.'],tabs:['Your tabs','Find a tab, keep it awake, or make a little room.'],settings:['Settings','Make yourself at home.'],shields:['Privacy & shields','Brave’s adblock engine. EasyList and EasyPrivacy. Controls that mean what they say.'],performance:['Performance','Fewer live pages. Less background work.'],extensions:['Extensions','Load and manage unpacked browser extensions.'],vpn:['VPN connections','Connect using VPN profiles configured in Windows.'],tools:['Browser menu','Everything you need, without the clutter.'],find:['Find in page','Search the current page for text.']};
+   const info={import:['Import browser data','Bring bookmarks, history and cookies into NoRAM.'],bookmarks:['Bookmarks','Keep the useful parts of the web close.'],history:['History',state.private?'This private window records no browsing history.':'Your recent pages, stored on this device.'],tabs:['Your tabs','Find a tab, keep it awake, or make a little room.'],settings:['Settings','Make yourself at home.'],shields:['Privacy & shields','Brave’s adblock engine. EasyList and EasyPrivacy. Controls that mean what they say.'],performance:['Performance','Fewer live pages. Less background work.'],extensions:['Extensions','Load and manage unpacked browser extensions.'],vpn:['VPN connections','Connect using VPN profiles configured in Windows.'],tools:['Browser menu','Everything you need, without the clutter.'],find:['Find in page','Search the current page for text.']};
    const entry=info[panel]||info.tools;pageHeader(page,...entry);
    if(['bookmarks','history','tabs'].includes(panel))collectionPage(page,panel);
    else if(['settings','shields','performance'].includes(panel))settingsPage(page,panel);
+   else if(panel==='import')importPage(page);
    else if(panel==='extensions')extensionsPage(page);
    else if(panel==='vpn')vpnPage(page);
    else toolsPage(page,panel==='find');
@@ -95,6 +97,7 @@ function renderPanel(){
  if(['bookmarks','history','tabs'].includes(panel))refreshCollection();
  if(panel==='extensions')refreshExtensions();
  if(panel==='vpn')refreshVpn();
+ if(panel==='import')refreshImport();
 }
 function engineSelect(){const select=el('select',undefined,'engine-select');select.setAttribute('aria-label','Search engine');for(const[id,name]of engines){const op=el('option',name);op.value=id;select.append(op);}select.value=state.settings.search_engine;select.onchange=()=>saveSettings({search_engine:select.value});return select;}
 function home(parent){
@@ -124,6 +127,7 @@ function setting(parent,title,description,key,type,options){const label=el('labe
 function section(parent,title){const s=el('div',undefined,'setting-section');s.append(el('h2',title));parent.append(s);return s;}
 function settingsPage(parent,kind){
  if(kind==='settings'){
+  const transfer=section(parent,'Your data');transfer.append(button('Import browser data','folder-open',()=>showPanel('import')));
   const appearance=section(parent,'Appearance');setting(appearance,'Theme','Choose a light, dark, or system appearance.','theme','select',[['system','System'],['light','Light'],['dark','Dark']]);setting(appearance,'Bookmarks bar','Keep saved pages below the address bar.','bookmarks_bar');
   const search=section(parent,'Search');setting(search,'Default search engine','Used by the address bar and start page.','search_engine','select',engines.map(([id,name])=>[id,name]));
   const grid=el('div',undefined,'engine-grid');for(const[id,name,bang]of engines){const b=el('button',undefined,'engine-card'+(id===state.settings.search_engine?' selected':''));b.append(el('b',name),el('small',bang+' search terms'));b.onclick=()=>{saveSettings({search_engine:id});grid.querySelectorAll('.engine-card').forEach(n=>n.classList.remove('selected'));b.classList.add('selected');search.querySelector('select').value=id;};grid.append(b);}parent.append(grid);
@@ -167,3 +171,29 @@ $('dismiss-toast').onclick=()=>$('toast').hidden=true;
 $('cancel-edit').onclick=()=>$('edit-dialog').close();
 $('edit-form').onsubmit=e=>{e.preventDefault();if(editing)send('edit_bookmark',{url:editing.url,title:$('bookmark-name').value});$('edit-dialog').close();};
 send('ready');
+
+function importPage(parent){
+ parent.classList.add('import-page');
+ if(state.private){notice(parent,'Import is unavailable in private windows. Open a regular window to import data.');return;}
+ notice(parent,'Preview first, then import. Bookmarks are deduplicated by URL. Up to 2,000 recent history entries are retained. Passwords, payment data, extensions and browser settings are not imported.','shield');
+ const profiles=section(parent,'Import from a browser profile');
+ const select=el('select',undefined,'engine-select');select.id='import-source';select.setAttribute('aria-label','Source browser profile');profiles.append(select);
+ const choices=el('div',undefined,'setting');const options={};for(const[key,label,checked]of[['bookmarks','Bookmarks',true],['history','History',true],['cookies','Firefox cookies',false]]){const wrap=el('label',undefined,'button secondary'),input=el('input');input.type='checkbox';input.checked=checked;input.id='import-'+key;options[key]=input;wrap.append(input,el('span',label));choices.append(wrap);}profiles.append(choices);
+ const selection=()=>Object.fromEntries(Object.entries(options).map(([k,v])=>[k,v.checked]));
+ profiles.append(button('Preview selected profile','search',()=>{if(select.value!=='')send('import_prepare',{source:Number(select.value),options:selection()});}),button('Choose profile folder','folder-open',()=>send('import_prepare',{kind:'profile',options:selection()})),button('Refresh profiles','loop2',()=>send('import_scan')));
+ profiles.append(el('p','For Brave, Chrome, Edge, Vivaldi and Opera, select Bookmarks and/or History. Firefox also supports cookies from its profile folder. Close the source browser if its database is locked.','description'));
+ const files=section(parent,'Import exported files');files.append(button('Choose bookmark file','bookmarks',()=>send('import_prepare',{kind:'bookmarks'})),button('Choose cookie file','lock',()=>send('import_prepare',{kind:'cookies'})));
+ files.append(el('p','Bookmarks: Netscape HTML or Chromium Bookmarks JSON. Cookies: JSON exports or Netscape cookies.txt (maximum 16 MB, 5,000 cookies). Expired, invalid, partitioned and Firefox container cookies are skipped.','description'));
+ notice(files,'Cookie exports contain sensitive login sessions. Only import files you trust. Import replaces cookies with the same name, domain and path. Some sites will still require you to sign in again. Delete the export after use.','lock');
+ const help=section(parent,'Export cookies from Brave, Chrome or Edge');help.append(el('p','Encrypted Chromium cookie databases cannot be imported directly. Use the included local cookie exporter: load tools/browser-cookie-export as an unpacked extension in the source browser, open its toolbar action and export a JSON file. Then choose that file above. The helper saves locally and sends nothing over the network.','description'));
+ const result=section(parent,'Import preview');result.id='import-result';refreshImport();
+}
+function refreshImport(){
+ const select=$('import-source');if(select){const sources=state.importSources||[],key=JSON.stringify(sources);if(select.dataset.key!==key){select.dataset.key=key;select.replaceChildren();if(!sources.length){const op=el('option','No profiles detected — choose a folder instead');op.value='';select.append(op);}sources.forEach((source,i)=>{const op=el('option',source.name);op.value=i;select.append(op);});}}
+ const host=$('import-result');if(!host)return;const data=state.importer||{status:'idle'},key=JSON.stringify(data);if(host.dataset.key===key)return;host.dataset.key=key;host.replaceChildren(el('h2','Import preview'));
+ if(data.status==='preview'){const c=data.counts;host.append(el('p',`${c.bookmarks} bookmarks · ${c.history} history entries · ${c.cookies} cookies · ${c.skipped} skipped.`));host.append(el('p','No data has been imported yet. Existing bookmarks are kept. Matching cookies will be replaced.','description'),button('Import selected data','checkmark',()=>send('import_apply',{ticket:data.ticket}),'primary'),button('Cancel','cross',()=>send('import_cancel')));}
+ else if(data.status==='reading'){host.append(el('p','Reading data for preview…'),button('Cancel','cross',()=>send('import_cancel')));}
+ else if(data.status==='done'){host.append(el('p',`Imported ${data.bookmarks} new bookmarks, ${data.history} new history entries and ${data.cookies} cookies. ${data.skipped} skipped; ${data.failed} cookie writes failed.`));}
+ else if(data.status==='error'){notice(host,data.message,'shield');}
+ else host.append(el('p','Choose a profile or exported file to preview its contents.','description'));
+}

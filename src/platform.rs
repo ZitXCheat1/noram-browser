@@ -367,3 +367,37 @@ pub fn change_extension(
     }
     Ok(())
 }
+
+pub fn import_cookies(
+    view: &WebView,
+    cookies: &[crate::importer::Cookie],
+) -> anyhow::Result<(usize, usize)> {
+    unsafe {
+        let manager = core(view)?.cast::<ICoreWebView2_2>()?.CookieManager()?;
+        let mut imported = 0;
+        let mut failed = 0;
+        for c in cookies {
+            let result = (|| -> windows::core::Result<()> {
+                let cookie = manager.CreateCookie(
+                    &windows::core::HSTRING::from(&c.name),
+                    &windows::core::HSTRING::from(&c.value),
+                    &windows::core::HSTRING::from(&c.domain),
+                    &windows::core::HSTRING::from(&c.path),
+                )?;
+                cookie.SetIsSecure(c.secure)?;
+                cookie.SetIsHttpOnly(c.http_only)?;
+                cookie.SetSameSite(COREWEBVIEW2_COOKIE_SAME_SITE_KIND(c.same_site))?;
+                if let Some(expires) = c.expires {
+                    cookie.SetExpires(expires)?;
+                }
+                manager.AddOrUpdateCookie(&cookie)
+            })();
+            if result.is_ok() {
+                imported += 1
+            } else {
+                failed += 1
+            }
+        }
+        Ok((imported, failed))
+    }
+}

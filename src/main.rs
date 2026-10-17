@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod importer;
 mod platform;
 mod policy;
 mod services;
@@ -49,6 +50,8 @@ enum Action {
     Message(String),
     Extensions(Vec<Value>),
     Vpn(Value),
+    ImportSources(Vec<importer::Source>),
+    ImportPrepared(u64, std::result::Result<importer::Data, String>),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -111,6 +114,10 @@ struct Browser {
         Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment>,
     extension_host: Option<WebView>,
     debug_port: Option<u16>,
+    import_sources: Vec<importer::Source>,
+    import_state: Value,
+    import_ticket: u64,
+    pending_import: Option<importer::Data>,
 }
 
 impl Browser {
@@ -190,7 +197,8 @@ impl Browser {
             "bookmarks":self.saved.bookmarks,"history":self.saved.history.iter().rev().take(150).collect::<Vec<_>>(),
             "blocked":self.tabs.iter().map(|t| t.blocked.get()).sum::<u64>(),
             "live":self.tabs.iter().filter(|t|t.view.is_some()).count(),"rules":self.blocker.len(),"message":self.message,
-            "closedCount":self.closed.len(),"extensions":self.extensions,"vpn":self.vpn
+            "closedCount":self.closed.len(),"extensions":self.extensions,"vpn":self.vpn,
+            "importSources":self.import_sources,"importer":self.import_state
         });
         let payload = data.to_string();
         if *self.last_render.borrow() == payload {
@@ -358,6 +366,84 @@ impl Browser {
             .position(|t| t.id == value["target"].as_u64().unwrap_or(self.active))
             .context("Tab was not found")?;
         match cmd {
+            "import_scan" => {
+                anyhow::ensure!(!self.private, "Import is unavailable in private windows");
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(Action::ImportSources(importer::discover()));
+                });
+            }
+            "import_cancel" => {
+                self.import_ticket += 1;
+                self.pending_import = None;
+                self.import_state = json!({"status":"idle"});
+            }
+            "import_prepare" => {
+                anyhow::ensure!(!self.private, "Import is unavailable in private windows");
+                let kind = value["kind"].as_str().unwrap_or("profile").to_owned();
+                let path = if let Some(index) = value["source"].as_u64() {
+                    self.import_sources
+                        .get(index as usize)
+                        .context("Select a browser profile")?
+                        .path
+                        .clone()
+                } else if let Some(path) = value["path"].as_str() {
+                    PathBuf::from(path)
+                } else {
+                    let selected = if kind == "profile" {
+                        services::pick_import_folder()?
+                    } else {
+                        services::pick_import_file()?
+                    };
+                    let Some(path) = selected else { return Ok(()) };
+                    path
+                };
+                let options = serde_json::from_value::<importer::Options>(value["options"].clone())
+                    .unwrap_or_default();
+                self.import_ticket += 1;
+                let ticket = self.import_ticket;
+                self.pending_import = None;
+                self.import_state = json!({"status":"reading"});
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let result = if kind == "profile" {
+                        importer::profile(&path, &options)
+                    } else {
+                        importer::file(&path, &kind)
+                    };
+                    // Parser errors may include source text; never expose cookie values.
+                    let result=result.map_err(|_|"Could not read this import. Check the format, selected data and profile folder. Close the source browser if its database is locked. Chromium cookies require a JSON or Netscape export file.".to_owned());
+                    let _ = proxy.send_event(Action::ImportPrepared(ticket, result));
+                });
+            }
+            "import_apply" => {
+                anyhow::ensure!(!self.private, "Import is unavailable in private windows");
+                anyhow::ensure!(
+                    value["ticket"].as_u64() == Some(self.import_ticket),
+                    "Import preview expired; preview again"
+                );
+                anyhow::ensure!(
+                    self.pending_import.is_some(),
+                    "Preview data before importing"
+                );
+                if !self.pending_import.as_ref().unwrap().cookies.is_empty() {
+                    self.ensure_extension_host()?;
+                }
+                let data = self.pending_import.take().unwrap();
+                let (cookies, failed) = if data.cookies.is_empty() {
+                    (0, 0)
+                } else {
+                    platform::import_cookies(self.extension_host.as_ref().unwrap(), &data.cookies)?
+                };
+                let bookmarks = importer::merge(&mut self.saved.bookmarks, data.bookmarks);
+                let history = importer::merge(&mut self.saved.history, data.history);
+                if self.saved.history.len() > 2000 {
+                    self.saved.history.drain(..self.saved.history.len() - 2000);
+                }
+                self.import_state = json!({"status":"done","bookmarks":bookmarks,"history":history,"cookies":cookies,"failed":failed,"skipped":data.skipped});
+                self.persist();
+                self.message="Import complete. Existing matching cookies were replaced; other browsing data was preserved.".into();
+            }
             "ready" => {}
             "reopen" => {
                 if let Some(entry) = self.closed.pop() {
@@ -694,6 +780,21 @@ impl Browser {
             Action::Message(message) => self.message = message,
             Action::Extensions(extensions) => self.extensions = extensions,
             Action::Vpn(vpn) => self.vpn = vpn,
+            Action::ImportSources(sources) => self.import_sources = sources,
+            Action::ImportPrepared(ticket, result) => {
+                if ticket == self.import_ticket && !self.private {
+                    match result {
+                        Ok(data) => {
+                            self.import_state =
+                                json!({"status":"preview","ticket":ticket,"counts":data.summary()});
+                            self.pending_import = Some(data);
+                        }
+                        Err(message) => {
+                            self.import_state = json!({"status":"error","message":message})
+                        }
+                    }
+                }
+            }
             Action::Loaded(id) => {
                 if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
                     t.loading = false;
@@ -876,6 +977,10 @@ fn main() -> Result<()> {
         vpn: json!({"profiles":[],"loaded":false}),
         writer,
         writer_thread,
+        import_sources: Vec::new(),
+        import_state: json!({"status":"idle"}),
+        import_ticket: 0,
+        pending_import: None,
     };
     let startup_url = args
         .iter()
