@@ -24,6 +24,7 @@ pub fn configure(
     blocker: Rc<Blocker>,
     blocked: Rc<Cell<u64>>,
     proxy: EventLoopProxy<Action>,
+    tab_id: u64,
 ) -> anyhow::Result<()> {
     unsafe {
         let web = core(view)?;
@@ -39,6 +40,21 @@ pub fn configure(
             .cast::<ICoreWebView2Profile3>()?
             .SetPreferredTrackingPreventionLevel(COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_STRICT)?;
         let mut token = 0;
+        let sources = proxy.clone();
+        web.add_SourceChanged(
+            &SourceChangedEventHandler::create(Box::new(move |sender, _| {
+                if let Some(sender) = sender {
+                    let mut uri = PWSTR::null();
+                    sender.Source(&mut uri)?;
+                    let uri = take_pwstr(uri);
+                    if uri.starts_with("http") {
+                        let _ = sources.send_event(Action::Source(tab_id, uri));
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
         let popup_proxy = proxy.clone();
         web.add_NewWindowRequested(
             &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
@@ -73,6 +89,8 @@ pub fn configure(
         } else {
             web.AddWebResourceRequestedFilter(w!("*"), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)?;
         }
+        let counters = proxy.clone();
+        let last_count = Rc::new(Cell::new(std::time::Instant::now()));
         web.add_WebResourceRequested(
             &WebResourceRequestedEventHandler::create(Box::new(move |sender, args| {
                 let Some(args) = args else { return Ok(()) };
@@ -80,6 +98,9 @@ pub fn configure(
                 let mut uri = PWSTR::null();
                 request.Uri(&mut uri)?;
                 let uri = take_pwstr(uri);
+                let mut method = PWSTR::null();
+                request.Method(&mut method)?;
+                let method = take_pwstr(method);
                 let policy = settings.borrow();
                 let mut source = PWSTR::null();
                 let source = if let Some(sender) = sender {
@@ -100,7 +121,30 @@ pub fn configure(
                 let insecure = policy.https_only
                     && url::Url::parse(&uri)
                         .is_ok_and(|u| u.scheme() == "http" && !crate::policy::local_host(&u));
-                if insecure || (policy.shields && !exception && blocker.blocks(&uri)) {
+                let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
+                args.ResourceContext(&mut context)?;
+                let kind = match context {
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT => "script",
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE => "image",
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET => "stylesheet",
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FONT => "font",
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST
+                    | COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FETCH => "xmlhttprequest",
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_MEDIA => "media",
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT => {
+                        if source == uri {
+                            "document"
+                        } else {
+                            "subdocument"
+                        }
+                    }
+                    _ => "other",
+                };
+                if insecure
+                    || (policy.shields
+                        && !exception
+                        && blocker.network_request(&uri, &source, kind, &method))
+                {
                     let response = env.CreateWebResourceResponse(
                         None,
                         403,
@@ -109,6 +153,12 @@ pub fn configure(
                     )?;
                     args.SetResponse(&response)?;
                     blocked.set(blocked.get() + 1);
+                    if blocked.get() == 1
+                        || last_count.get().elapsed() > std::time::Duration::from_millis(80)
+                    {
+                        last_count.set(std::time::Instant::now());
+                        let _ = counters.send_event(Action::Counters);
+                    }
                 } else if let Ok(headers) = request.Headers() {
                     headers.SetHeader(w!("DNT"), w!("1"))?;
                     headers.SetHeader(w!("Sec-GPC"), w!("1"))?;
@@ -141,8 +191,14 @@ pub fn shortcuts(view: &WebView, proxy: EventLoopProxy<Action>) -> anyhow::Resul
                 let cmd = match (ctrl, shift, key) {
                     (true, _, 76) => "focus",
                     (true, false, 84) => "new",
+                    (true, true, 84) => "reopen",
                     (true, _, 87) => "close",
-                    (true, _, 9) => "next",
+                    (true, false, 9) => "next",
+                    (true, true, 9) => "previous",
+                    (true, true, 65) => "show_tabs",
+                    (true, _, 72) => "show_history",
+                    (true, true, 79) => "show_bookmarks",
+                    (true, _, 70) => "show_find",
                     (true, _, 68) => "bookmark",
                     (true, _, 82) | (false, _, 116) => "reload",
                     (false, _, 27) => "stop",
@@ -191,6 +247,123 @@ pub fn clear_data(v: &WebView, proxy: EventLoopProxy<Action>) -> anyhow::Result<
                     Ok(())
                 },
             )))?;
+    }
+    Ok(())
+}
+pub fn mute(view: &WebView, muted: bool) -> anyhow::Result<()> {
+    unsafe {
+        core(view)?.cast::<ICoreWebView2_8>()?.SetIsMuted(muted)?;
+    }
+    Ok(())
+}
+pub fn downloads(view: &WebView) -> anyhow::Result<()> {
+    unsafe {
+        core(view)?
+            .cast::<ICoreWebView2_9>()?
+            .OpenDefaultDownloadDialog()?;
+    }
+    Ok(())
+}
+fn extension_profile(view: &WebView) -> anyhow::Result<ICoreWebView2Profile7> {
+    unsafe {
+        Ok(core(view)?
+            .cast::<ICoreWebView2_13>()?
+            .Profile()?
+            .cast::<ICoreWebView2Profile7>()?)
+    }
+}
+pub fn extensions(view: &WebView, proxy: EventLoopProxy<Action>) -> anyhow::Result<()> {
+    unsafe {
+        extension_profile(view)?.GetBrowserExtensions(&ProfileGetBrowserExtensionsCompletedHandler::create(Box::new(move|result,list|{
+        if let Err(e)=result{let _=proxy.send_event(Action::Message(format!("Extensions unavailable: {e}")));return Ok(())}
+        let mut entries=Vec::new();
+        if let Some(list)=list{let mut count=0;list.Count(&mut count)?;for i in 0..count{let extension=list.GetValueAtIndex(i)?;let(mut id,mut name)=(PWSTR::null(),PWSTR::null());extension.Id(&mut id)?;extension.Name(&mut name)?;let mut enabled=windows::core::BOOL::default();extension.IsEnabled(&mut enabled)?;entries.push(serde_json::json!({"id":take_pwstr(id),"name":take_pwstr(name),"enabled":enabled.as_bool()}));}}
+        let _=proxy.send_event(Action::Extensions(entries));Ok(())
+    })))?;
+    }
+    Ok(())
+}
+pub fn add_extension(
+    view: &WebView,
+    path: &std::path::Path,
+    proxy: EventLoopProxy<Action>,
+) -> anyhow::Result<()> {
+    let path = path.canonicalize()?;
+    anyhow::ensure!(
+        path.join("manifest.json").is_file(),
+        "Select an unpacked extension folder containing manifest.json"
+    );
+    unsafe {
+        extension_profile(view)?.AddBrowserExtension(&windows::core::HSTRING::from(path.to_string_lossy().as_ref()),&ProfileAddBrowserExtensionCompletedHandler::create(Box::new(move|result,_|{
+        let message=match result{Ok(())=>"Extension loaded. Reload existing website tabs to apply its content scripts.".into(),Err(e)=>format!("Could not load extension: {e}")};let _=proxy.send_event(Action::Message(message));let _=proxy.send_event(Action::Command(serde_json::json!({"cmd":"extensions"})));Ok(())
+    })))?;
+    }
+    Ok(())
+}
+pub fn change_extension(
+    view: &WebView,
+    id: &str,
+    enabled: Option<bool>,
+    proxy: EventLoopProxy<Action>,
+) -> anyhow::Result<()> {
+    let id = id.to_owned();
+    unsafe {
+        extension_profile(view)?.GetBrowserExtensions(
+            &ProfileGetBrowserExtensionsCompletedHandler::create(Box::new(move |result, list| {
+                result?;
+                if let Some(list) = list {
+                    let mut count = 0;
+                    list.Count(&mut count)?;
+                    for i in 0..count {
+                        let extension = list.GetValueAtIndex(i)?;
+                        let mut found = PWSTR::null();
+                        extension.Id(&mut found)?;
+                        if take_pwstr(found) == id {
+                            let proxy = proxy.clone();
+                            if let Some(enabled) = enabled {
+                                extension.Enable(
+                                    enabled,
+                                    &BrowserExtensionEnableCompletedHandler::create(Box::new(
+                                        move |result| {
+                                            let message = match result {
+                                                Ok(()) => "Extension updated.".into(),
+                                                Err(e) => e.to_string(),
+                                            };
+                                            let _ = proxy.send_event(Action::Message(message));
+                                            let _ = proxy.send_event(Action::Command(
+                                                serde_json::json!({"cmd":"extensions"}),
+                                            ));
+                                            Ok(())
+                                        },
+                                    )),
+                                )?;
+                            } else {
+                                extension.Remove(
+                                    &BrowserExtensionRemoveCompletedHandler::create(Box::new(
+                                        move |result| {
+                                            let message = match result {
+                                                Ok(()) => "Extension removed.".into(),
+                                                Err(e) => e.to_string(),
+                                            };
+                                            let _ = proxy.send_event(Action::Message(message));
+                                            let _ = proxy.send_event(Action::Command(
+                                                serde_json::json!({"cmd":"extensions"}),
+                                            ));
+                                            Ok(())
+                                        },
+                                    )),
+                                )?;
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+                let _ = proxy.send_event(Action::Message(
+                    "Extension was not found. Refresh the list.".into(),
+                ));
+                Ok(())
+            })),
+        )?;
     }
     Ok(())
 }

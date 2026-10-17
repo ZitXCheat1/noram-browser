@@ -14,7 +14,8 @@ async (page) => {
   await page.getByRole('textbox',{name:'Address or search',exact:true}).fill('http://127.0.0.1:48621/one?utm_source=smoke&q=kept');
   await page.getByRole('textbox',{name:'Address or search',exact:true}).press('Enter');
   await until(s=>s.tabs.some(t=>t.url==='http://127.0.0.1:48621/one?q=kept'&&!t.loading),'native page navigation');
-  let content=page.context().pages().find(p=>p.url().includes('48621/one'));
+  const contentBrowser=await page.context().browser().browserType().connectOverCDP('http://127.0.0.1:9241');
+  let content=contentBrowser.contexts().flatMap(c=>c.pages()).find(p=>p.url().includes('48621/one'));
   assert(content,'Content webview exists');
   assert(await content.getByRole('heading',{name:'Native browser fixture'}).isVisible(),'Real content rendered');
   const headers=await content.evaluate(async()=>await(await fetch('/headers')).json());
@@ -57,5 +58,6 @@ async (page) => {
   await command('new');
   assert(errors.length===0,'No trusted UI JavaScript errors: '+errors.join(', '));
   await page.screenshot({path:'output/playwright/start-page.png'});
+  await contentBrowser.close();
   return {passed:['native rendering','URL cleanup','DNT and GPC server headers','geolocation denial','network blocker HTTP 403','bookmark','back/forward','scripted-popup denial','user popup tab','tab unloading/resume','pinned exemption','unsafe scheme rejection','HTTPS upgrade','UI without JavaScript errors'],state:await read()};
 }

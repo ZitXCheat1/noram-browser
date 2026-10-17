@@ -1,3 +1,8 @@
+use adblock::{
+    lists::{FilterSet, ParseOptions},
+    request::Request,
+    Engine,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use url::Url;
@@ -10,6 +15,10 @@ pub struct Settings {
     pub strip_tracking: bool,
     pub max_live_tabs: usize,
     pub exceptions: HashSet<String>,
+    pub search_engine: String,
+    pub theme: String,
+    pub bookmarks_bar: bool,
+    pub cosmetic_filtering: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -19,6 +28,10 @@ impl Default for Settings {
             strip_tracking: true,
             max_live_tabs: 4,
             exceptions: HashSet::new(),
+            search_engine: "duckduckgo".into(),
+            theme: "system".into(),
+            bookmarks_bar: false,
+            cosmetic_filtering: true,
         }
     }
 }
@@ -28,40 +41,105 @@ pub fn host_matches(host: &str, rule: &str) -> bool {
 }
 
 pub struct Blocker {
-    domains: HashSet<String>,
+    engine: Engine,
+    rules: usize,
 }
 impl Default for Blocker {
     fn default() -> Self {
-        Self {
-            domains: include_str!("../assets/blocklist.txt")
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty() && !s.starts_with('#'))
-                .map(str::to_owned)
-                .collect(),
-        }
+        let domains = include_str!("../assets/blocklist.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+            .map(|s| format!("||{s}^"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self::from_lists(&[
+            include_str!("../assets/filters/easylist.txt"),
+            include_str!("../assets/filters/easyprivacy.txt"),
+            &domains,
+        ])
     }
 }
 impl Blocker {
-    pub fn blocks(&self, input: &str) -> bool {
-        let Ok(url) = Url::parse(input) else {
-            return false;
-        };
-        let Some(mut host) = url.host_str() else {
-            return false;
-        };
-        loop {
-            if self.domains.contains(host) {
-                return true;
-            }
-            match host.split_once('.') {
-                Some((_, rest)) => host = rest,
-                None => return false,
+    pub fn load(profile: &std::path::Path, private: bool) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for source in [
+            include_str!("../assets/filters/easylist.txt"),
+            include_str!("../assets/filters/easyprivacy.txt"),
+            include_str!("../assets/blocklist.txt"),
+            "adblock-0.13.3",
+        ] {
+            source.hash(&mut hash);
+        }
+        let cache = profile.join(format!("filters-{:016x}.dat", hash.finish()));
+        if std::fs::metadata(&cache).is_ok_and(|m| m.len() < 32 * 1024 * 1024) {
+            if let Ok(bytes) = std::fs::read(&cache) {
+                let mut engine = Engine::new_with_filter_set(FilterSet::new(false));
+                if engine.deserialize(&bytes).is_ok() {
+                    let rules = [
+                        include_str!("../assets/filters/easylist.txt"),
+                        include_str!("../assets/filters/easyprivacy.txt"),
+                    ]
+                    .iter()
+                    .map(|list| {
+                        list.lines()
+                            .filter(|line| {
+                                !line.is_empty() && !line.starts_with('!') && !line.starts_with('[')
+                            })
+                            .count()
+                    })
+                    .sum::<usize>()
+                        + include_str!("../assets/blocklist.txt")
+                            .lines()
+                            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                            .count();
+                    return Self { engine, rules };
+                }
             }
         }
+        let blocker = Self::default();
+        if !private {
+            let tmp = cache.with_extension("tmp");
+            if std::fs::write(&tmp, blocker.engine.serialize()).is_ok() {
+                let _ = std::fs::rename(tmp, cache);
+            }
+        }
+        blocker
+    }
+    pub fn from_lists(lists: &[&str]) -> Self {
+        let mut set = FilterSet::new(false);
+        let mut rules = 0;
+        for list in lists {
+            rules += list
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('!') && !line.starts_with('['))
+                .count();
+            set.add_filter_list((*list).to_owned(), ParseOptions::default());
+        }
+        Self {
+            engine: Engine::new_with_filter_set(set),
+            rules,
+        }
+    }
+    #[cfg(test)]
+    pub fn blocks(&self, input: &str, source: &str, kind: &str) -> bool {
+        self.network_request(input, source, kind, "GET")
+    }
+    pub fn network_request(&self, input: &str, source: &str, kind: &str, method: &str) -> bool {
+        Request::new(input, source, kind, method)
+            .is_ok_and(|request| self.engine.check_network_request(&request).should_block())
+    }
+    pub fn cosmetic_script(&self, url: &str) -> String {
+        let resources = self.engine.url_cosmetic_resources(url);
+        let selectors: Vec<_> = resources.hide_selectors.into_iter().collect();
+        let json = serde_json::to_string(&selectors).unwrap_or_else(|_| "[]".into());
+        format!(
+            r#"(()=>{{const selectors={json};if(!selectors.length)return;let style=document.getElementById('__noram_shields');if(!style){{style=document.createElement('style');style.id='__noram_shields';(document.head||document.documentElement).append(style);}}for(const s of selectors){{try{{style.sheet.insertRule(s+'{{display:none!important}}',style.sheet.cssRules.length)}}catch(_e){{}}}}}})()"#
+        )
     }
     pub fn len(&self) -> usize {
-        self.domains.len()
+        self.rules
     }
 }
 
@@ -130,8 +208,34 @@ pub fn address(input: &str, settings: &Settings) -> Result<String, String> {
             settings,
         );
     }
-    let mut url = Url::parse("https://duckduckgo.com/").unwrap();
-    url.query_pairs_mut().append_pair("q", text);
+    let mut engine = settings.search_engine.as_str();
+    let mut query = text;
+    if let Some((bang, rest)) = text.split_once(' ') {
+        if let Some(selected) = match bang {
+            "!g" => Some("google"),
+            "!b" => Some("brave"),
+            "!d" => Some("duckduckgo"),
+            "!w" => Some("wikipedia"),
+            "!s" => Some("startpage"),
+            "!bi" => Some("bing"),
+            "!e" => Some("ecosia"),
+            _ => None,
+        } {
+            engine = selected;
+            query = rest.trim();
+        }
+    }
+    let (base, key) = match engine {
+        "google" => ("https://www.google.com/search", "q"),
+        "brave" => ("https://search.brave.com/search", "q"),
+        "bing" => ("https://www.bing.com/search", "q"),
+        "startpage" => ("https://www.startpage.com/sp/search", "query"),
+        "ecosia" => ("https://www.ecosia.org/search", "q"),
+        "wikipedia" => ("https://en.wikipedia.org/w/index.php", "search"),
+        _ => ("https://duckduckgo.com/", "q"),
+    };
+    let mut url = Url::parse(base).unwrap();
+    url.query_pairs_mut().append_pair(key, query);
     Ok(url.into())
 }
 
@@ -140,10 +244,61 @@ mod tests {
     use super::*;
     #[test]
     fn blocks_subdomains_without_overmatching() {
-        let b = Blocker::default();
-        assert!(b.blocks("https://a.doubleclick.net/ad.js"));
-        assert!(!b.blocks("https://notdoubleclick.net/"));
-        assert!(!b.blocks("https://example.org/doubleclick.net"));
+        let b = Blocker::from_lists(&["||doubleclick.net^"]);
+        assert!(b.blocks(
+            "https://a.doubleclick.net/ad.js",
+            "https://example.org",
+            "script"
+        ));
+        assert!(!b.blocks(
+            "https://notdoubleclick.net/",
+            "https://example.org",
+            "script"
+        ));
+        assert!(!b.blocks(
+            "https://example.org/doubleclick.net",
+            "https://example.org",
+            "script"
+        ));
+    }
+    #[test]
+    fn brave_engine_honors_types_and_exceptions() {
+        let b = Blocker::from_lists(&["||ads.example^$script\n@@||ads.example/allowed.js$script"]);
+        assert!(b.blocks(
+            "https://ads.example/banner.js",
+            "https://site.example",
+            "script"
+        ));
+        assert!(!b.blocks(
+            "https://ads.example/banner.png",
+            "https://site.example",
+            "image"
+        ));
+        assert!(!b.blocks(
+            "https://ads.example/allowed.js",
+            "https://site.example",
+            "script"
+        ));
+    }
+    #[test]
+    fn search_selection_and_bang_override() {
+        let mut settings = Settings {
+            search_engine: "brave".into(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            address("rust browser", &settings).unwrap(),
+            "https://search.brave.com/search?q=rust+browser"
+        );
+        assert_eq!(
+            address("!g a&b", &settings).unwrap(),
+            "https://www.google.com/search?q=a%26b"
+        );
+        settings.search_engine = "wikipedia".into();
+        assert_eq!(
+            address("Rust language", &settings).unwrap(),
+            "https://en.wikipedia.org/w/index.php?search=Rust+language"
+        );
     }
     #[test]
     fn tracking_removal_preserves_functional_parameters() {

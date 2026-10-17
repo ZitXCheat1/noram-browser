@@ -1,0 +1,1 @@
+{"manifest_version":3,"name":"NoRAM QA fixture","version":"1.0","description":"Harmless DOM marker for native extension and trusted-UI isolation checks","content_scripts":[{"matches":["<all_urls>"],"js":["content.js"],"run_at":"document_idle"}]}

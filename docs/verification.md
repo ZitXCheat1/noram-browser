@@ -1,71 +1,95 @@
-# Verification — 17 October 2026
+# NoRAM 0.2 verification — 17 October 2026
 
-Tested locally on Windows with Rust 1.97.0 and the installed Evergreen WebView2 Runtime. The app is Windows-only. Tests used disposable `--profile` directories and loopback fixtures, separate from the visible interactive browser.
+Tested on Windows with Rust 1.97.0 and the installed Evergreen WebView2 Runtime. The optimized executable was tested in disposable profiles, independently of personal browsing. Screenshots are actual app webviews, not design mockups.
 
-![Actual NoRAM desktop webview](start-page.png)
+![Light theme](start-page.png)
+![Dark theme](start-page-dark.png)
 
-## Build and policy checks
+## Build checks
 
 - `cargo fmt --check` passed.
-- `cargo test --locked --offline` passed: four tests covering domain boundaries/subdomains, parameter preservation, HTTPS upgrade, local development, search encoding, and rejection of unsafe schemes/embedded credentials.
-- `cargo clippy --locked --offline --all-targets -- -D warnings` passed. Windows sandbox emitted an infrastructure warning about copying incremental files when hard links were unavailable; there were no code diagnostics.
-- `cargo build --release --locked --offline` passed. One Cargo job is configured to avoid the memory spikes observed with parallel compilation of generated Windows bindings.
+- `cargo test --locked --offline` passed: six tests covering URL cleanup, search selection/bang overrides, unsafe schemes, domain boundaries, and Brave engine request-type/exception matching.
+- `cargo clippy --locked --offline --all-targets -- -D warnings` passed with no code diagnostics. The Windows sandbox emitted an incremental-cache hard-link fallback warning; it copied files instead.
+- `cargo build --release --locked --offline` passed.
+- JavaScript syntax checks passed for the UI and smoke scripts.
 
-## Native app checks
+Cargo uses one build job to avoid the memory spikes seen with parallel compilation of the generated Windows bindings. No CodeRabbit CLI was installed; review was local, supported by Rust checks and the native tests below.
 
-`scripts/smoke.js` ran through Playwright attached to the actual optimized desktop app's WebView2 targets. This was not a website mock of a browser. Fourteen grouped checks passed:
+## Native browser and privacy regression
 
-1. A real local page rendered in its own content webview.
-2. Navigating with `utm_source=smoke&q=kept` retained `q=kept` and removed the tracking parameter.
-3. A real HTTP fixture received `DNT: 1` and `Sec-GPC: 1`.
-4. A geolocation request returned permission-denied through native policy.
-5. A request to the reserved blocked test domain returned HTTP 403 from the native interceptor and incremented the counter.
-6. Bookmark creation appeared in the saved state.
-7. Native back and forward loaded the expected fixture URLs.
-8. A scripted popup after transient user activation expired did not create a tab.
-9. A user-clicked `target="_blank"` link created a tab.
-10. A one-page live budget unloaded the least recently used background webview.
-11. Selecting an unloaded tab reloaded it while staying within that budget.
-12. Pinning a tab exempted it from unloading, allowing two live pages with a budget of one.
-13. `javascript:` navigation was rejected.
-14. Public HTTP upgraded to HTTPS, and the trusted UI produced no JavaScript exceptions throughout the suite. These are separate assertions grouped in the result output.
+`scripts/smoke.js` passed all 14 grouped checks against the optimized executable:
 
-The reserved `ads.noram.test` rule verifies the application interceptor without a dependency on an advertising company's network. A separate exploratory request to `doubleclick.net` was blocked earlier by the engine's strict tracking prevention, so it did not prove the application's own 403 path. Requests blocked by engine tracking prevention are not included in the application counter.
+- Real website rendering in a content webview.
+- Tracking-parameter removal with a functional query parameter preserved.
+- A loopback HTTP server actually received `DNT: 1` and `Sec-GPC: 1`.
+- Native geolocation permission denial.
+- The application interceptor returned HTTP 403 for `ads.noram.test` and incremented the blocked counter. This reserved domain avoids dependence on a real advertiser's network.
+- Bookmark creation and native back/forward navigation.
+- An unsolicited popup was denied after transient user activation expired; a clicked new-window link opened a tab.
+- Live-tab-budget unloading and resumption; pinned tabs were exempt.
+- Rejection of `javascript:` addresses, public HTTP-to-HTTPS upgrade, and no UI JavaScript exceptions during the suite.
 
-`scripts/private-smoke.js` verified that the private shell reports private mode, private content cannot read normal localStorage, normal content cannot read private localStorage, and a private bookmark works in memory. A SHA-256 comparison confirmed `browser.json` was unchanged during the private test. This did not test forensic erasure, every storage API, or all network-based identification.
+Real ad domains can be blocked by the engine's strict tracking prevention before the application handler sees them. Those requests are not included in NoRAM's counter. A blocked test URL proves interception, not comprehensive coverage of all advertisements or trackers.
 
-`scripts/restore-smoke.js` verified that a restart restored three website tabs with zero live website webviews, retained the bookmark and normal site storage, resumed a selected tab, and cleared localStorage through native `ClearBrowsingDataAll` with its success callback. A second normal process targeting the same test profile exited with the explicit profile-lock error.
+`scripts/private-smoke.js` passed four checks: private-mode flag, private inability to read normal localStorage, normal inability to read private localStorage, and private bookmark functionality in memory. A SHA-256 comparison confirmed `browser.json` did not change during the private actions. Normal history was not extended by private browsing. This is not a forensic-erasure or anonymity test.
 
-## Reproduce the smoke suite
+`scripts/restore-smoke.js` passed five checks after a restart: zero live website pages on lazy restoration, bookmark restoration, retained pin/mute state, persisted normal localStorage, and native site-data clearing with its completion callback and verified removal of the stored value. The compiled adblock cache was reused without rewriting it. The cache filename depends on the bundled lists and engine version, and deserialization verifies its format before use.
 
-Use fresh test profiles; the smoke script changes settings and bookmarks and expects a clean starting state. Build the release binary first. Start the loopback fixture in one terminal:
+## UI, tabs and added features
+
+`scripts/v02-smoke.js` passed 13 grouped checks:
+
+1. Theme selection and the bookmarks bar.
+2. Search-engine preference selection.
+3. Bookmark renaming and search filtering.
+4. Stable tab DOM across 300 identical state updates.
+5. Drag reordering of actual browser tabs.
+6. Duplicate, close and reopen actions.
+7. Native tab muting.
+8. A real unpacked extension's content script ran on a website.
+9. That extension used `<all_urls>` and was not injected into the separate trusted UI environment.
+10. The extension could be disabled, re-enabled and removed. A fresh website navigation verified its absence while disabled and return while enabled.
+11. Windows VPN profile enumeration completed successfully and returned an empty list. The UI displayed that no profiles were configured; it did not pretend to connect.
+12. The bundled Figtree font loaded.
+13. All 34 visible SVG icon instances had rendered geometry.
+
+With five tabs, every tab DOM node remained the same through 300 repeated updates. The 95th-percentile synchronous UI reconciliation time was approximately **0.2 ms** in this local run. This excludes native IPC, rendering/compositing, sleeping-tab recreation, network requests and website execution. It is not an end-to-end tab-switch latency or a browser performance comparison.
+
+Visual QA verified both light and dark start pages. It caught and repaired dark-theme text contrast and a missing favicon route. The start page had no horizontal overflow at 760- and 1600-pixel CSS viewport widths; the final UI console reported zero errors and warnings. Existing personal browser tabs were not used for these tests.
+
+## Reproduce locally
+
+Run commands from the repository root. Install/use the Playwright CLI separately; it is a developer tool, not a browser dependency. Use fresh disposable profiles; the smoke scripts change test preferences, bookmarks and page storage.
+
+Start the loopback fixture in one terminal:
 
 ```powershell
 node scripts/qa-server.cjs
 ```
 
-In another terminal:
+Build and start a hidden instance in another:
 
 ```powershell
+cargo build --release --locked
 New-Item -ItemType Directory -Force output/playwright | Out-Null
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9231 --remote-debugging-address=127.0.0.1'
-.\target\release\noram-browser.exe --profile artifacts/smoke-profile --background
-```
-
-Attach the installed Playwright CLI from another terminal:
-
-```powershell
-playwright-cli -s=noram-smoke attach --cdp http://127.0.0.1:9231
+$qaBrowser = Start-Process .\target\release\noram-browser.exe -ArgumentList '--profile artifacts/smoke-profile --background --debug-port 9240' -PassThru
+playwright-cli -s=noram-smoke attach --cdp http://127.0.0.1:9240
 playwright-cli -s=noram-smoke snapshot
 playwright-cli -s=noram-smoke run-code --filename scripts/smoke.js
 ```
 
-For the private check, launch a second instance with the same environment, `--private --profile artifacts/smoke-profile --background`, then run `scripts/private-smoke.js` in the existing attached session. Compare the SHA-256 of `browser.json` before/after private actions. Close the private test process; restart the normal test instance with the same profile and run `scripts/restore-smoke.js`.
+The UI is at port 9240; website/extension webviews are in a separate engine environment at 9241. The scripts connect to that second endpoint after a website environment exists. Use `--debug-port`, rather than a process-wide `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` override that would assign both environments the same port. Normal app launches request no debugging ports.
 
-Only enable remote debugging for disposable test instances. Remove `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` in that terminal afterward, and close the test instances and fixture. Normal launches do not request a debugging port. Scripts invoke the same Rust commands as the UI; the main navigation and website links also use real UI interactions.
+For the private test, launch the same executable with `--private --profile artifacts/smoke-profile --background --debug-port 9240`, then run `scripts/private-smoke.js` in the existing attached session. Compare the profile JSON's SHA-256 before and after the private actions. Stop only that private test process when complete.
 
-## Not established
+Run `scripts/v02-smoke.js` after the original smoke suite. It loads only the harmless fixture extension in `tests/extension`, checks it, then removes it. It enumerates VPN profiles without attempting any connection. Before the restore check, mute the pinned fixture tab with URL ending `/two`, allow the background profile write to settle, restart the test instance on the same profile, and run `scripts/restore-smoke.js`.
 
-No comparative performance benchmark was performed. This does not establish lower RAM, CPU, startup latency or page-load latency than Chrome, Brave or Firefox. Working-set totals need the entire WebView2 process tree and careful handling of shared memory. A live-view count is an architectural check, not a measurement of memory saved.
+Close the disposable app processes and the fixture server afterward. Never enable remote debugging for a personal browsing profile. The smoke scripts exercise the real Rust command handlers; navigation, tab dragging, bookmark editing and settings also use actual UI interactions.
 
-Download dialogs, printing, webcam/microphone flows, accessibility with screen readers, hostile-site penetration testing, DRM, extensions, long-running stability, all shortcut combinations, Windows installation packaging, and clean-machine setup were not comprehensively tested. CodeRabbit was unavailable; review was local, supported by Rust checks and the native smoke suite. GitHub Actions is configured independently; local success is not a claim that hosted CI has completed.
+## Limits of this evidence
+
+No comparative CPU, memory, startup or page-load benchmark was performed. Count the entire WebView2 process tree when measuring resources, including the separate trusted interface environment and any extension service view. Shared-memory accounting, page set, runtime versions, cache state, viewport and idle period must be controlled.
+
+No VPN tunnel was established because no VPN profile/provider was available. The connect/disconnect implementation invokes Windows against an explicitly selected saved profile; its behavior with a real provider remains unverified. This is not an included VPN service or kill switch.
+
+Chrome Web Store compatibility, extension toolbar popups, every Chromium extension API, advanced cosmetic rules/scriptlets, fingerprint resistance, all website permissions, DRM, downloads/printing, screen-reader accessibility, long-running stability and clean-machine installation were not comprehensively tested. Adblock lists are bundled snapshots, not an automatic update service. Hosted GitHub Actions status must be checked separately from these local results.
