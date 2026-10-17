@@ -1,0 +1,8 @@
+/target/
+/artifacts/
+/output/
+/.playwright-cli/
+/.playwright/
+*.log
+.env*
+!*.example

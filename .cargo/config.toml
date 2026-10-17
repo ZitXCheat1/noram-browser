@@ -1,0 +1,3 @@
+[build]
+# The generated Windows bindings are large. Avoid parallel rustc memory spikes.
+jobs = 1
