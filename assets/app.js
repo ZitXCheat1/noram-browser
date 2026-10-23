@@ -30,9 +30,9 @@ function selectTab(id){
   send('switch',{id});
 }
 function makeTab(tab){
- const node=el('div',undefined,'tab');node.dataset.id=tab.id;node.setAttribute('role','tab');node.draggable=true;
+ const node=el('div',undefined,'tab');node.dataset.id=tab.id;node.setAttribute('role','presentation');node.draggable=true;
  const glyph=el('span',undefined,'tab-icon'),label=el('button',undefined,'tab-label');
- label.type='button';label.onpointerdown=e=>{if(e.button===0)selectTab(tab.id);};label.onclick=e=>{if(e.detail===0)selectTab(tab.id);};
+ label.type='button';label.setAttribute('role','tab');label.onkeydown=e=>{const keys=['ArrowLeft','ArrowRight','Home','End'];if(!keys.includes(e.key))return;e.preventDefault();const index=state.tabs.findIndex(t=>t.id===tab.id),next=e.key==='Home'?0:e.key==='End'?state.tabs.length-1:(index+(e.key==='ArrowRight'?1:-1)+state.tabs.length)%state.tabs.length;selectTab(state.tabs[next].id);tabNodes.get(state.tabs[next].id)?._label.focus();};label.onpointerdown=e=>{if(e.button===0)selectTab(tab.id);};label.onclick=e=>{if(e.detail===0)selectTab(tab.id);};
  const close=iconButton('cross','Close tab',e=>{e.stopPropagation();send('close',{id:tab.id});});close.classList.add('tab-close');
  node.append(glyph,label,close);node._glyph=glyph;node._label=label;
  node.onauxclick=e=>{if(e.button===1){e.preventDefault();send('close',{id:tab.id});}};
@@ -51,7 +51,7 @@ function renderTabs(){
  for(let index=0;index<state.tabs.length;index++){
   const tab=state.tabs[index];let node=tabNodes.get(tab.id);if(!node){node=makeTab(tab);tabNodes.set(tab.id,node);}
   const cls='tab'+(tab.id===state.active?' active':'')+(tab.pinned?' pinned':'')+(tab.sleeping?' sleeping':'')+(tab.loading?' loading':'');
-  if(node.className!==cls)node.className=cls;node.setAttribute('aria-selected',String(tab.id===state.active));
+  if(node.className!==cls)node.className=cls;node._label.setAttribute('aria-selected',String(tab.id===state.active));node._label.tabIndex=tab.id===state.active?0:-1;
   if(node._label.textContent!==tab.title)node._label.textContent=tab.title;node._label.title=tab.title+'\n'+tab.url;
   setIcon(node._glyph,tab.loading?'spinner8':tab.muted?'volume-mute2':tab.pinned?'pushpin':tab.sleeping?'cloud':'earth');
   if(host.children[index]!==node)host.insertBefore(node,host.children[index]||null);
@@ -63,7 +63,7 @@ systemTheme.addEventListener('change',applyTheme);
 function update(next){
  const previous=state?.active;state=next;
  if(previous!==undefined&&previous!==state.active){panel='home';mounted='';}
- applyTheme();renderTabs();const tab=active();
+ applyTheme();renderTabs();renderPermission();renderUpdateStatus();const tab=active();
  if(document.activeElement!==$('address'))$('address').value=tab?.url==='noram://newtab'?'':tab?.url||'';
  setIcon($('security'),tab?.url.startsWith('https:')?'lock':tab?.url.startsWith('http:')?'earth':'search');
  $('security').title=tab?.url.startsWith('https:')?'HTTPS connection':tab?.url.startsWith('http:')?'Unencrypted HTTP connection':'Search or navigate';
@@ -80,6 +80,8 @@ function updateStats(){for(const n of document.querySelectorAll('[data-stat]')){
 function pageHeader(parent,title,description){const header=el('div',undefined,'page-header'),text=el('div',undefined,'page-heading');text.append(el('div','YOUR BROWSER','eyebrow'),el('h1',title),el('p',description,'description'));header.append(text,iconButton('cross','Back to website',goBackToPage));parent.append(header);}
 function renderPanel(){
  if(!state)return;$('sidebar').hidden=panel==='home';
+ if(active()?.crashed&&panel==='home'){const host=$('content');host.replaceChildren();const page=el('div',undefined,'page');pageHeader(page,'This page stopped','Reload to recover this tab. Unsaved website state may have been lost.');page.append(button('Reload tab','loop2',()=>send('retry_tab')));host.append(page);mounted='crashed';return;}
+
  document.querySelectorAll('.side-link').forEach(n=>n.classList.toggle('selected',n.dataset.panel===panel));
  if(mounted!==panel){mounted=panel;const host=$('content');host.replaceChildren();host.scrollTop=0;
   if(panel==='home')home(host);
@@ -116,7 +118,7 @@ function refreshCollection(){
  for(const item of entries){const row=el('div',undefined,'collection-row'+(kind==='tabs'&&item.id===state.active?' tab-current':'')),open=el('button',undefined,'entry-open');open.append(el('b',item.title||item.url),el('small',item.url));open.onclick=()=>kind==='tabs'?selectTab(item.id):navigate(item.url);row.append(icon(kind==='tabs'?(item.pinned?'pushpin':item.sleeping?'cloud':'earth'):kind==='bookmarks'?'bookmark':'history'),open);const actions=el('div',undefined,'row-actions');
   if(kind==='bookmarks'){actions.append(iconButton('cog','Edit bookmark',()=>{editing=item;$('bookmark-name').value=item.title;$('edit-dialog').showModal();}),iconButton('bin','Remove bookmark',()=>send('remove_bookmark',{url:item.url})));}
   else if(kind==='history')actions.append(iconButton('bin','Remove from history',()=>send('remove_history',{url:item.url})));
-  else{if(item.sleeping)actions.append(el('span','Sleeping','tag'));actions.append(iconButton('pushpin',item.pinned?'Unpin tab':'Pin tab',()=>send('pin',{target:item.id})),iconButton(item.muted?'volume-mute2':'volume-medium',item.muted?'Unmute tab':'Mute tab',()=>send('mute',{target:item.id})),iconButton('copy','Duplicate tab',()=>send('duplicate',{target:item.id})),iconButton('cross','Close tab',()=>send('close',{id:item.id})));}
+  else{if(item.crashed)actions.append(el('span','Crashed — select to reload','tag'));if(item.protected||item.protection)actions.append(el('span','Kept awake','tag'));if(item.sleeping)actions.append(el('span','Sleeping','tag'));actions.append(iconButton('pushpin',item.pinned?'Unpin tab':'Pin tab',()=>send('pin',{target:item.id})),iconButton(item.muted?'volume-mute2':'volume-medium',item.muted?'Unmute tab':'Mute tab',()=>send('mute',{target:item.id})),iconButton('copy','Duplicate tab',()=>send('duplicate',{target:item.id})),iconButton('cross','Close tab',()=>send('close',{id:item.id})));}
   row.append(actions);rows.append(row);
  }
 }
@@ -127,7 +129,12 @@ function setting(parent,title,description,key,type,options){const label=el('labe
 function section(parent,title){const s=el('div',undefined,'setting-section');s.append(el('h2',title));parent.append(s);return s;}
 function settingsPage(parent,kind){
  if(kind==='settings'){
-  const transfer=section(parent,'Your data');transfer.append(button('Import browser data','folder-open',()=>showPanel('import')));
+  const transfer=section(parent,'Your data');transfer.append(button('Import browser data','folder-open',()=>showPanel('import')),button('Export bookmarks','download3',()=>send('export_bookmarks')));
+  if(!state.private)transfer.append(button('Back up profile','download3',()=>send('profile_backup')),button('Restore backup on restart','undo2',()=>{if(confirm('Choose a NoRAM JSON backup to restore after restarting. Your current profile will be preserved. Website cookies and passwords are not restored.'))send('profile_restore');}));
+  const updates=section(parent,'Updates and installation');setting(updates,'Check for app updates','Check the project’s GitHub releases at startup. Installing an update requires your action and a verified publisher signature.','auto_app_updates');updates.append(button('Check for updates','loop2',()=>send('app_update_check')),button('Install available update','download3',()=>send('app_update_install')),button('Choose default browser','earth',()=>send('default_browser')));const status=el('p',undefined,'description');status.id='update-status';updates.append(status);renderUpdateStatus();
+  const permissions=section(parent,'Site permissions');notice(permissions,'Permission prompts identify the requesting origin. Camera and microphone grants keep their tab awake until navigation. Private choices stay in memory.');
+  for(const[origin,rules]of Object.entries(state.settings.permissions||{})){const row=el('div',undefined,'collection-row');row.append(el('span',origin+' — '+Object.entries(rules).map(([k,v])=>k+': '+(v?'allowed':'blocked')).join(', ')),button('Reset permissions','undo2',()=>{send('permission_reset',{origin});row.remove();}));permissions.append(row);}
+
   const appearance=section(parent,'Appearance');setting(appearance,'Theme','Choose a light, dark, or system appearance.','theme','select',[['system','System'],['light','Light'],['dark','Dark']]);setting(appearance,'Bookmarks bar','Keep saved pages below the address bar.','bookmarks_bar');
   const search=section(parent,'Search');setting(search,'Default search engine','Used by the address bar and start page.','search_engine','select',engines.map(([id,name])=>[id,name]));
   const grid=el('div',undefined,'engine-grid');for(const[id,name,bang]of engines){const b=el('button',undefined,'engine-card'+(id===state.settings.search_engine?' selected':''));b.append(el('b',name),el('small',bang+' search terms'));b.onclick=()=>{saveSettings({search_engine:id});grid.querySelectorAll('.engine-card').forEach(n=>n.classList.remove('selected'));b.classList.add('selected');search.querySelector('select').value=id;};grid.append(b);}parent.append(grid);
@@ -137,14 +144,14 @@ function settingsPage(parent,kind){
  if(kind==='shields'){
   const block=section(parent,'Shields');setting(block,'Block ads and trackers','Brave adblock-rust matches EasyList and EasyPrivacy network rules, including request-type and exception rules.','shields');setting(block,'Hide page ad elements','Apply domain-specific CSS hiding rules after a page loads. Advanced scriptlets and procedural filters are not included.','cosmetic_filtering');setting(block,'Require HTTPS','Upgrade public HTTP pages and block insecure resources. Localhost is exempt.','https_only');setting(block,'Clean tracking parameters','Remove known click identifiers and utm_ values from navigations.','strip_tracking');
   const actions=el('div',undefined,'actions');actions.append(button('Toggle exception for current site','shield',()=>send('exception')),button('Clear cookies and site storage','bin',()=>{if(confirm('Clear cookies, cache and site storage? This signs you out of websites.'))send('clear_data');}));parent.append(actions);
-  notice(parent,'Strict engine tracking prevention is active. Camera, microphone, location, notifications and clipboard-read permissions are denied. Blocking trackers does not prevent all fingerprinting.');
+  notice(parent,'Strict engine tracking prevention is active. Supported website permissions ask for your decision. Unknown permission types are denied. Manage saved site permissions in Settings.');
   const exceptions=el('p','Site exceptions: '+(state.settings.exceptions.join(', ')||'none'),'description');parent.append(exceptions);
-  notice(parent,'EasyList and EasyPrivacy are bundled snapshots from 17 October 2026. This release does not update them automatically. Adblock-rust integration does not imply full Brave Shields coverage.','list');
+  setting(parent,'Update filter lists automatically','Check EasyList and EasyPrivacy once a day on normal startup. Failed updates retain the last valid lists.','auto_filter_updates');parent.append(button('Update filters now','loop2',()=>send('filter_update')));const filterStatus=el('p',state.filterStatus,'description');filterStatus.id='filter-status';parent.append(filterStatus);
  }
  if(kind==='performance'){
   const resources=section(parent,'Resource controls');setting(resources,'Maximum live website tabs','The least recently used unpinned background tab unloads when this budget is exceeded.','max_live_tabs','select',[1,2,3,4,6,8,12,16].map(n=>[n,String(n)+' tabs']));
-  const actions=el('div',undefined,'actions');actions.append(button(active()?.pinned?'Unpin current tab':'Pin current tab','pushpin',()=>send('pin')),button('Unload current tab','cloud',()=>send('sleep')));parent.append(actions);
-  notice(parent,'Unloading discards unsaved work, media playback, scroll position and in-tab history. Pin forms, calls and active downloads. Pinned tabs can exceed your live-tab budget.','warning');
+  const actions=el('div',undefined,'actions');actions.append(button(active()?.pinned?'Unpin current tab':'Pin current tab','pushpin',()=>send('pin')),button('Unload current tab','cloud',()=>{if(confirm('Unload this page? This loses page history and unsaved state. Audio, downloads and media-capture tabs cannot be unloaded.'))send('sleep',{confirmed:true});}));parent.append(actions);
+  notice(parent,'Automatic unloading protects editable pages, embedded frames, media, active downloads and granted camera/microphone sessions. Failed safety checks keep tabs awake. Protected tabs can exceed the budget. Simple pages resume their saved scroll position; page history is lost. Pin custom web apps whose unsaved state cannot be detected.','warning');
   notice(parent,'The UI keeps tab elements in place, receives native page events, and saves the profile in a background worker. No two-second idle polling. A live-tab limit is not a speed or memory benchmark.','rocket');
  }
 }
@@ -159,7 +166,7 @@ function vpnPage(parent){const actions=el('div',undefined,'actions');actions.app
 function refreshVpn(){const host=$('vpn-list');if(!host)return;const key=JSON.stringify(state.vpn);if(host.dataset.key===key)return;host.dataset.key=key;host.replaceChildren();if(!state.vpn.loaded){host.append(el('div','Reading Windows VPN profiles…','empty'));return;}if(state.vpn.error||!state.vpn.profiles?.length){host.append(el('div',state.vpn.error||'No VPN profiles are configured. Add one in Windows VPN settings.','empty'));return;}for(const profile of state.vpn.profiles){const connected=profile.ConnectionStatus==='Connected',row=el('div',undefined,'collection-row'),text=el('div',undefined,'entry-open');text.append(el('b',profile.Name),el('small',profile.TunnelType+' · '+profile.ConnectionStatus));const action=button(connected?'Disconnect':'Connect','power',()=>{action.disabled=true;send(connected?'vpn_disconnect':'vpn_connect',{name:profile.Name});});row.append(icon('lock'),text,action);host.append(row);}}
 function toolsPage(parent,findOnly){
  const form=el('form',undefined,'search-filter'),input=el('input');input.placeholder='Find text on this page';input.setAttribute('aria-label','Find in page');const submit=button('Find next','search',()=>{});submit.type='submit';form.append(icon('search'),input,submit);form.onsubmit=e=>{e.preventDefault();send('find',{text:input.value});goBackToPage();};parent.append(form);if(findOnly){input.focus();return;}
- const grid=el('div',undefined,'tool-grid');for(const[label,glyph,action]of[['New tab','plus',()=>send('new')],['Private window','eye-blocked',()=>send('private')],['Bookmarks','bookmarks',()=>showPanel('bookmarks')],['History','history',()=>showPanel('history')],['Downloads','download3',()=>{send('downloads');goBackToPage();}],['Reopen closed tab','undo2',()=>send('reopen')],['Duplicate tab','copy',()=>send('duplicate')],['Print / save PDF','printer',()=>send('print')],['Developer tools','embed2',()=>send('devtools')],['Extensions','embed2',()=>showPanel('extensions')],['VPN connections','lock',()=>showPanel('vpn')],['Settings','cog',()=>showPanel('settings')]]){const b=el('button',undefined,'tool-card');b.append(icon(glyph),el('span',label));b.onclick=action;grid.append(b);}parent.append(grid);
+ const grid=el('div',undefined,'tool-grid');for(const[label,glyph,action]of[['New tab','plus',()=>send('new')],['Private window','eye-blocked',()=>send('private')],['Bookmarks','bookmarks',()=>showPanel('bookmarks')],['History','history',()=>showPanel('history')],['Downloads','download3',()=>{send('downloads');goBackToPage();}],['Reopen closed tab','undo2',()=>send('reopen')],['Duplicate tab','copy',()=>send('duplicate')],['Print / save PDF','printer',()=>send('print')],['Save PDF file','download3',()=>send('save_pdf')],['Choose download folder','folder-open',()=>send('download_directory')],['Developer tools','embed2',()=>send('devtools')],['Extensions','embed2',()=>showPanel('extensions')],['VPN connections','lock',()=>showPanel('vpn')],['Settings','cog',()=>showPanel('settings')]]){const b=el('button',undefined,'tool-card');b.append(icon(glyph),el('span',label));b.onclick=action;grid.append(b);}parent.append(grid);
  const actions=el('div',undefined,'actions');for(const[label,glyph,value]of[['Zoom out','shrink',-.1],['Reset zoom','search',0],['Zoom in','enlarge',.1]])actions.append(button(label,glyph,()=>{zoom=value===0?1:Math.max(.25,Math.min(3,zoom+value));send('zoom',{value:zoom});}));parent.append(actions);
  notice(parent,'Ctrl+Shift+T reopens a closed tab. Ctrl+Shift+A searches tabs. Ctrl+H opens history. Ctrl+Shift+O opens bookmarks. Ctrl+F finds text.','keyboard');
 }
@@ -196,4 +203,16 @@ function refreshImport(){
  else if(data.status==='done'){host.append(el('p',`Imported ${data.bookmarks} new bookmarks, ${data.history} new history entries and ${data.cookies} cookies. ${data.skipped} skipped; ${data.failed} cookie writes failed.`));}
  else if(data.status==='error'){notice(host,data.message,'shield');}
  else host.append(el('p','Choose a profile or exported file to preview its contents.','description'));
+}
+
+function renderUpdateStatus(){
+ const host=$('update-status');if(host)host.textContent=state.updates?.message||({idle:'No update check yet.',checking:'Checking for updates…'}[state.updates?.status]||'');
+ const filter=$('filter-status');if(filter)filter.textContent=state.filterStatus;
+}
+function renderPermission(){
+ let dialog=$('permission-dialog');const request=state.permissionRequests?.[0];
+ if(!dialog){dialog=el('dialog');dialog.id='permission-dialog';dialog.setAttribute('aria-labelledby','permission-title');const title=el('h2','Website permission');title.id='permission-title';const message=el('p');message.id='permission-message';const actions=el('div',undefined,'actions');for(const[label,allow,remember]of[['Block',false,false],['Allow once',true,false],['Always allow',true,true],['Always block',false,true]])actions.append(button(label,'shield',()=>{const current=state.permissionRequests?.[0];if(current)send('permission_decide',{id:current.id,allow,remember});dialog.close();}));dialog.append(title,message,actions);dialog.oncancel=e=>{e.preventDefault();const current=state.permissionRequests?.[0];if(current)send('permission_decide',{id:current.id,allow:false});dialog.close();};document.body.append(dialog);}
+ if(!request){if(dialog.open)dialog.close();return;}
+ $('permission-message').textContent=request.origin+' requests '+request.kind+' access.';
+ if(!dialog.open)dialog.showModal();
 }

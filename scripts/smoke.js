@@ -20,7 +20,10 @@ async (page) => {
   assert(await content.getByRole('heading',{name:'Native browser fixture'}).isVisible(),'Real content rendered');
   const headers=await content.evaluate(async()=>await(await fetch('/headers')).json());
   assert(headers.dnt==='1'&&headers['sec-gpc']==='1','Privacy request headers arrived at real HTTP server');
-  const permission=await content.evaluate(()=>new Promise(resolve=>navigator.geolocation.getCurrentPosition(()=>resolve('allowed'),error=>resolve(error.code),{timeout:5000})));
+  const pendingPermission=content.evaluate(()=>new Promise(resolve=>navigator.geolocation.getCurrentPosition(()=>resolve('allowed'),error=>resolve(error.code),{timeout:5000})));
+  await page.waitForFunction(()=>state.permissionRequests.length>0);
+  await page.getByRole('button',{name:'Block',exact:true}).click();
+  const permission=await pendingPermission;
   assert(permission===1,'Geolocation permission denied by native policy');
   await content.evaluate(()=>localStorage.setItem('noram-qa-normal','normal-only'));
   const blockBefore=(await read()).blocked;

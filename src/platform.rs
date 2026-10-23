@@ -18,14 +18,23 @@ use wry::{WebView, WebViewExtWindows};
 fn core(view: &WebView) -> windows::core::Result<ICoreWebView2> {
     unsafe { view.controller().CoreWebView2() }
 }
+pub struct TabContext {
+    pub activity: crate::lifecycle::SharedActivity,
+    pub permissions: crate::permissions::Queue,
+}
 pub fn configure(
     view: &WebView,
     settings: Rc<RefCell<Settings>>,
-    blocker: Rc<Blocker>,
+    blocker: Rc<RefCell<Blocker>>,
     blocked: Rc<Cell<u64>>,
     proxy: EventLoopProxy<Action>,
     tab_id: u64,
+    context: TabContext,
 ) -> anyhow::Result<()> {
+    let TabContext {
+        activity,
+        permissions,
+    } = context;
     unsafe {
         let web = core(view)?;
         let env = view.environment();
@@ -71,10 +80,135 @@ pub fn configure(
             })),
             &mut token,
         )?;
+        let permission_proxy = proxy.clone();
+        let permission_settings = settings.clone();
+        let permission_activity = activity.clone();
         web.add_PermissionRequested(
-            &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+            &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                // Keep the host in control of revocation and private-mode persistence.
+                let Ok(extended) = args.cast::<ICoreWebView2PermissionRequestedEventArgs3>() else {
+                    return Ok(());
+                };
+                extended.SetSavesInProfile(false)?;
+                let mut uri = PWSTR::null();
+                args.Uri(&mut uri)?;
+                let Some(origin) = crate::permissions::origin(&take_pwstr(uri)) else {
+                    return Ok(());
+                };
+                let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                args.PermissionKind(&mut kind)?;
+                let Some(kind) = crate::permissions::name(kind) else {
+                    return Ok(());
+                };
+                if let Some(allow) = permission_settings
+                    .borrow()
+                    .permissions
+                    .get(&origin)
+                    .and_then(|m| m.get(kind))
+                    .copied()
+                {
+                    if allow {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+                        if matches!(kind, "camera" | "microphone") {
+                            permission_activity.capture.set(true);
+                        }
+                    }
+                    return Ok(());
+                }
+                let mut queue = permissions.borrow_mut();
+                if queue.len() >= 8 {
+                    return Ok(());
+                }
+                static NEXT_PERMISSION: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(1);
+                let id = NEXT_PERMISSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let deferral = args.GetDeferral()?;
+                permission_activity
+                    .permissions
+                    .set(permission_activity.permissions.get() + 1);
+                queue.push(crate::permissions::Request {
+                    id,
+                    tab: tab_id,
+                    origin,
+                    kind: kind.into(),
+                    generation: permission_activity.generation.get(),
+                    activity: permission_activity.clone(),
+                    args: args.clone(),
+                    deferral,
+                });
+                let _ = permission_proxy.send_event(Action::PermissionPrompt);
+                Ok(())
+            })),
+            &mut token,
+        )?;
+        let audio_activity = activity.clone();
+        let audio_proxy = proxy.clone();
+        web.cast::<ICoreWebView2_8>()?
+            .add_IsDocumentPlayingAudioChanged(
+                &IsDocumentPlayingAudioChangedEventHandler::create(Box::new(move |sender, _| {
+                    if let Some(sender) = sender {
+                        let mut playing = windows::core::BOOL::default();
+                        sender
+                            .cast::<ICoreWebView2_8>()?
+                            .IsDocumentPlayingAudio(&mut playing)?;
+                        audio_activity.audio.set(playing.as_bool());
+                        let _ = audio_proxy.send_event(Action::Counters);
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+        let download_activity = activity;
+        let download_proxy = proxy.clone();
+        web.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
+            &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let operation = args.DownloadOperation()?;
+                download_activity
+                    .downloads
+                    .set(download_activity.downloads.get() + 1);
+                let activity = download_activity.clone();
+                let proxy = download_proxy.clone();
+                let finished = Rc::new(Cell::new(false));
+                operation.add_StateChanged(
+                    &StateChangedEventHandler::create(Box::new(move |sender, _| {
+                        if let Some(sender) = sender {
+                            let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
+                            sender.State(&mut state)?;
+                            if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED
+                                && !finished.replace(true)
+                            {
+                                activity
+                                    .downloads
+                                    .set(activity.downloads.get().saturating_sub(1));
+                                let _ = proxy.send_event(Action::Counters);
+                            }
+                        }
+                        Ok(())
+                    })),
+                    &mut 0,
+                )?;
+                let _ = download_proxy.send_event(Action::Counters);
+                Ok(())
+            })),
+            &mut token,
+        )?;
+        let crash_proxy = proxy.clone();
+        web.add_ProcessFailed(
+            &ProcessFailedEventHandler::create(Box::new(move |_, args| {
                 if let Some(args) = args {
-                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                    let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                    args.ProcessFailedKind(&mut kind)?;
+                    if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                        || kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED
+                    {
+                        let _ = crash_proxy.send_event(Action::Crashed(
+                            tab_id,
+                            kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+                        ));
+                    }
                 }
                 Ok(())
             })),
@@ -143,7 +277,9 @@ pub fn configure(
                 if insecure
                     || (policy.shields
                         && !exception
-                        && blocker.network_request(&uri, &source, kind, &method))
+                        && blocker
+                            .borrow()
+                            .network_request(&uri, &source, kind, &method))
                 {
                     let response = env.CreateWebResourceResponse(
                         None,
@@ -400,4 +536,59 @@ pub fn import_cookies(
         }
         Ok((imported, failed))
     }
+}
+
+pub fn probe(
+    view: &WebView,
+    id: u64,
+    generation: u64,
+    proxy: EventLoopProxy<Action>,
+) -> anyhow::Result<()> {
+    unsafe {
+        core(view)?.ExecuteScript(
+            &windows::core::HSTRING::from(crate::lifecycle::PROBE),
+            &ExecuteScriptCompletedHandler::create(Box::new(move |result, raw| {
+                let raw = if result.is_ok() { raw } else { String::new() };
+                let _ = proxy.send_event(Action::SleepProbe(id, generation, raw));
+                Ok(())
+            })),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn save_pdf(
+    view: &WebView,
+    path: &std::path::Path,
+    proxy: EventLoopProxy<Action>,
+) -> anyhow::Result<()> {
+    let path = std::path::absolute(path)?;
+    unsafe {
+        core(view)?.cast::<ICoreWebView2_7>()?.PrintToPdf(
+            &windows::core::HSTRING::from(path.to_string_lossy().as_ref()),
+            None,
+            &PrintToPdfCompletedHandler::create(Box::new(move |result, success| {
+                let message = if result.is_ok() && success {
+                    "PDF saved.".into()
+                } else {
+                    "Could not save PDF.".into()
+                };
+                let _ = proxy.send_event(Action::Message(message));
+                Ok(())
+            })),
+        )?;
+    }
+    Ok(())
+}
+pub fn download_directory(view: &WebView, path: &std::path::Path) -> anyhow::Result<()> {
+    let path = path.canonicalize()?;
+    unsafe {
+        core(view)?
+            .cast::<ICoreWebView2_13>()?
+            .Profile()?
+            .SetDefaultDownloadFolderPath(&windows::core::HSTRING::from(
+                path.to_string_lossy().as_ref(),
+            ))?;
+    }
+    Ok(())
 }

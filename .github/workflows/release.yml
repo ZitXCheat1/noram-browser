@@ -1,0 +1,50 @@
+name: Signed Windows package
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Load release signing identity
+        shell: pwsh
+        env:
+          SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          if (-not $env:SIGNING_PFX) { throw 'Configure the release signing certificate before building official updates.' }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'noram-release.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX))
+          $password = ConvertTo-SecureString $env:SIGNING_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          "NORAM_UPDATE_SIGNER_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Sign executable and installer
+        shell: pwsh
+        run: |
+          $signTool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          & $signTool sign /sha1 $env:NORAM_UPDATE_SIGNER_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target/release/noram-browser.exe
+          if ($LASTEXITCODE) { throw 'Executable signing failed' }
+          $version = (Select-String '^version = "([^"]+)"' Cargo.toml).Matches[0].Groups[1].Value
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' "/DAppVersion=$version" installer/noram.iss
+          if ($LASTEXITCODE) { throw 'Installer compilation failed' }
+          & $signTool sign /sha1 $env:NORAM_UPDATE_SIGNER_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 artifacts/installer/NoRAM-Setup-x64.exe
+          if ($LASTEXITCODE) { throw 'Installer signing failed' }
+          & $signTool verify /pa artifacts/installer/NoRAM-Setup-x64.exe
+          if ($LASTEXITCODE) { throw 'Installer verification failed' }
+          Get-FileHash artifacts/installer/NoRAM-Setup-x64.exe -Algorithm SHA256 | Format-List | Out-File artifacts/installer/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-installer
+          path: artifacts/installer/
+      - name: Remove temporary certificate material
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'noram-release.pfx') -ErrorAction SilentlyContinue
+          if ($env:NORAM_UPDATE_SIGNER_THUMBPRINT) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$env:NORAM_UPDATE_SIGNER_THUMBPRINT" -ErrorAction SilentlyContinue }

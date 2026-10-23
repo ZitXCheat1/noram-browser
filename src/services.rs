@@ -39,9 +39,7 @@ pub fn profile_writer(
                     Err(_) => break,
                 }
             }
-            let tmp = profile.join("browser.json.tmp");
-            let result = std::fs::write(&tmp, bytes)
-                .and_then(|_| std::fs::rename(&tmp, profile.join("browser.json")));
+            let result = crate::profile::commit(&profile, &bytes);
             if let Err(e) = result {
                 let _ = proxy.send_event(Action::Message(format!("Could not save profile: {e}")));
             }
@@ -158,4 +156,43 @@ fn pick_import(folder: bool) -> Result<Option<PathBuf>> {
             dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?,
         ))))
     }
+}
+
+pub fn save_file(title: &str, filename: &str) -> Result<Option<PathBuf>> {
+    unsafe {
+        let dialog: windows::Win32::UI::Shell::IFileSaveDialog = CoCreateInstance(
+            &windows::Win32::UI::Shell::FileSaveDialog,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )?;
+        dialog.SetOptions(FOS_FORCEFILESYSTEM | windows::Win32::UI::Shell::FOS_OVERWRITEPROMPT)?;
+        dialog.SetTitle(&windows::core::HSTRING::from(title))?;
+        dialog.SetFileName(&windows::core::HSTRING::from(filename))?;
+        if let Err(e) = dialog.Show(None) {
+            if e.code().0 as u32 == 0x800704c7 {
+                return Ok(None);
+            }
+            return Err(e.into());
+        }
+        Ok(Some(PathBuf::from(webview2_com::take_pwstr(
+            dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?,
+        ))))
+    }
+}
+pub fn default_browser() -> Result<()> {
+    unsafe {
+        let result = windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            w!("open"),
+            w!("ms-settings:defaultapps"),
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+        anyhow::ensure!(
+            result.0 as isize > 32,
+            "Could not open default apps settings"
+        );
+    }
+    Ok(())
 }

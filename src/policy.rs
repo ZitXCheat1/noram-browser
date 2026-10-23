@@ -4,7 +4,7 @@ use adblock::{
     Engine,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use url::Url;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -19,6 +19,9 @@ pub struct Settings {
     pub theme: String,
     pub bookmarks_bar: bool,
     pub cosmetic_filtering: bool,
+    pub permissions: HashMap<String, HashMap<String, bool>>,
+    pub auto_filter_updates: bool,
+    pub auto_app_updates: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -32,6 +35,9 @@ impl Default for Settings {
             theme: "system".into(),
             bookmarks_bar: false,
             cosmetic_filtering: true,
+            permissions: HashMap::new(),
+            auto_filter_updates: true,
+            auto_app_updates: true,
         }
     }
 }
@@ -62,6 +68,16 @@ impl Default for Blocker {
 }
 impl Blocker {
     pub fn load(profile: &std::path::Path, private: bool) -> Self {
+        if let Some(lists) = crate::updates::cached_lists(profile) {
+            let domains = include_str!("../assets/blocklist.txt")
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                .map(|s| format!("||{s}^"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Self::from_lists(&[&lists.easylist, &lists.easyprivacy, &domains]);
+        }
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         for source in [

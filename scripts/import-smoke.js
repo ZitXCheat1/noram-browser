@@ -22,6 +22,6 @@ async(page)=>{
  }finally{await sites.close();}pass.push('cookie attributes and real HTTP request');
  await page.evaluate(()=>showPanel('import'));await cmd('import_prepare',{kind:'cookies',path:root+'artifacts/import-bookmarks.html'});await until(s=>s.importer.status==='preview'||s.importer.status==='error','invalid file');
  await cmd('import_prepare',{kind:'cookies',path:root+'artifacts/import-cookies.json'});await until(s=>s.importer.status==='preview','final preview');
- await page.screenshot({path:root+'docs/import-data.png'});
+ await page.screenshot({path:root+'output/playwright/import-data.png'});
  return {passed:pass};
 }
